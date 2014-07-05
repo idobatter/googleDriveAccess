@@ -31,6 +31,7 @@ CREDENTIAL_FILE = 'credentials_%s.json.enc'
 
 MANIFEST = 'manifest.json'
 SCRIPT_TYPE = 'application/vnd.google-apps.script+json'
+FOLDER_TYPE = 'application/vnd.google-apps.folder'
 
 def readClientId(basedir):
   f = open(os.path.join(basedir, CICACHE_FILE), 'rb')
@@ -130,7 +131,8 @@ class DAClient(object):
     self.basedir = basedir
     self.clientId = clientId
     self.script = script
-    self.pfields = ['modifiedDate', 'title', 'id', 'mimeType']
+    self.printFields = ['modifiedDate', 'title', 'id', 'mimeType']
+    self.printCallback = self.defaultPrintCallback
     self.drive_service = None
     if self.clientId is None:
       self.clientId = readClientId(self.basedir)
@@ -175,6 +177,19 @@ class DAClient(object):
       return None
     return self.drive_service
 
+  def setPrintFields(self, pfields):
+    self.printFields = pfields
+
+  def setPrintCallback(self, pcallback):
+    self.printCallback = pcallback
+
+  def defaultPrintCallback(self, e):
+    for f in e['items']:
+      for fld in self.printFields:
+        print f[fld],
+      print
+    print 'len: %d, hasNext: %s' % (len(e['items']), 'nextPageToken' in e)
+
   def execQuery(self, q, repeattoken=False, noprint=False, **kwargs):
     '''
     kwargs = {'maxResults': 10} # default maxResults=100
@@ -188,14 +203,50 @@ class DAClient(object):
       else: result['items'] += e['items']
       # e does not have 'nextPageToken' key when len(e['items']) <= maxResults
       npt = e.get('nextPageToken')
-      if not noprint:
-        for f in e['items']:
-          for fld in self.pfields:
-            print f[fld],
-          print
-        print 'len: %d, nextPageToken: %s' % (len(e['items']), npt)
+      if not noprint and not self.printCallback is None: self.printCallback(e)
       if not repeattoken: break
     return result
+
+  def procentry(self, mode, folderId, q, **kwargs):
+    result = []
+    c = '=' if mode else '!='
+    query = "'%s' in parents and mimeType%s'%s'" % (folderId, c, FOLDER_TYPE)
+    entries = self.execQuery(query, True, True, **kwargs)
+    for entry in entries['items']:
+      result += [map(lambda a: entry[a], self.printFields)]
+    return result
+
+  def walk_visit(self, folderId, visit, arg,
+    depth=[], topdown=True, q=None, **kwargs):
+    '''like os.path.walk()'''
+    edirs = self.procentry(True, folderId, q, **kwargs)
+    efiles = self.procentry(False, folderId, q, **kwargs)
+    if not len(depth):
+      depth = [('0000-00-00T00:00:00.000Z', '', folderId, None)]
+    visit(arg, depth, edirs)
+    if topdown: visit(arg, depth, edirs, efiles)
+    for ed in edirs:
+      self.walk_visit(ed[2], visit, arg, depth + [ed])
+    if not topdown: visit(arg, depth, edirs, efiles)
+
+  def walk_iter(self, folderId, topdown=True, q=None, **kwargs):
+    '''like os.walk()'''
+
+    def procfolders(epaths, folders):
+      for folder in folders:
+        id = folder[2]
+        edirs = self.procentry(True, id, q, **kwargs)
+        efiles = self.procentry(False, id, q, **kwargs)
+        nepaths = epaths + [folder]
+        if topdown: yield nepaths, edirs, efiles
+        for ep, ed, ef in procfolders(nepaths, edirs):
+          yield ep, ed, ef
+        if not topdown: yield nepaths, edirs, efiles
+
+    epaths = []
+    folders = [('0000-00-00T00:00:00.000Z', '', folderId, None)]
+    for ep, ed, ef in procfolders(epaths, folders):
+      yield ep, ed, ef
 
 class DAScript(DAClient):
   def __init__(self, basedir, folder, clientId=None):
